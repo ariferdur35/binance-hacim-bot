@@ -228,7 +228,7 @@ def check_volume_spike(symbol: str) -> dict | None:
         # 🚀 Yeni filtreler
         if last_vol * close_price < MIN_VOLUME_USDT:  # USDT hacmi kontrolü
             return None
-        if abs(price_change) < MIN_BAR_CHANGE:       # minimum bar değişimi kontrolü
+        if price_change < MIN_BAR_CHANGE:       # minimum bar değişimi kontrolü
             return None
         if ratio < VOLUME_MULTIPLIER:               # hacim artış oranı kontrolü
             return None
