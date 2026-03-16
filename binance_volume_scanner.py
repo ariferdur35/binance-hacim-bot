@@ -230,13 +230,20 @@ def check_volume_spike(symbol: str) -> dict | None:
             return None
         if abs(price_change) < MIN_BAR_CHANGE:       # minimum bar değişimi kontrolü
             return None
+        if ratio < VOLUME_MULTIPLIER:               # hacim artış oranı kontrolü
+            return None
 
-        if ratio >= VOLUME_MULTIPLIER:
-            return {
-                "symbol": symbol, "last_vol": last_vol, "avg_vol": avg_vol,
-                "ratio": ratio, "close_price": close_price,
-                "price_change": price_change, "bar_time": bar_time,
-            }
+        # Tüm filtreleri geçen coin
+        return {
+            "symbol": symbol,
+            "last_vol": last_vol,
+            "avg_vol": avg_vol,
+            "ratio": ratio,
+            "close_price": close_price,
+            "price_change": price_change,
+            "bar_time": bar_time,
+        }
+    
     except Exception as e:
         log.debug(f"{symbol} atlandı: {e}")
     return None
