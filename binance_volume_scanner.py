@@ -202,6 +202,8 @@ def get_klines(symbol: str, interval: str, limit: int) -> list:
     resp.raise_for_status()
     return resp.json()
 
+# Global olarak gönderilmiş barları tutacağız
+sent_bars = set()
 
 def check_volume_spike(symbol: str) -> dict | None:
     try:
@@ -229,9 +231,16 @@ def check_volume_spike(symbol: str) -> dict | None:
         if last_vol * close_price < MIN_VOLUME_USDT:  # USDT hacmi kontrolü
             return None
         if abs(price_change) < MIN_BAR_CHANGE:       # minimum bar değişimi kontrolü
+            log.debug(f"{symbol} elendi: bar değişimi {price_change:.2f}% < {MIN_BAR_CHANGE}%")
             return None
         if ratio < VOLUME_MULTIPLIER:               # hacim artış oranı kontrolü
             return None
+        
+        # Aynı barın tekrar gönderilmesini engelle
+        bar_id = f"{symbol}-{closed[0]}"  # symbol + timestamp
+        if bar_id in sent_bars:
+            return None
+        sent_bars.add(bar_id)
 
         # Tüm filtreleri geçen coin
         return {
@@ -305,7 +314,6 @@ def run_scan(subscribers: set) -> None:
     if results:
         results.sort(key=lambda x: x["ratio"], reverse=True)
         message = build_message(results, scan_time)
-        # log.info(f"Telegram mesajı =>  {message}")
         send_to_all(subscribers, message)
     else:
         log.info("Eşiği aşan coin bulunamadı.")
