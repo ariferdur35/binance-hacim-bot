@@ -15,8 +15,10 @@ TELEGRAM_BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 INTERVAL          = "15m"
 SCAN_PERIOD_MIN   = 15
-LOOKBACK_BARS     = 21
-VOLUME_MULTIPLIER = 2.1
+LOOKBACK_BARS     = 50
+VOLUME_MULTIPLIER = 3.1
+MIN_VOLUME_USDT = 10000  # minimum hacim 10k USDT
+MIN_BAR_CHANGE = 5  # yüzde
 
 SUBSCRIBERS_FILE  = "subscribers.json"   # Chat ID'ler burada saklanır
 MAX_LEN = 4000
@@ -218,11 +220,18 @@ def check_volume_spike(symbol: str) -> dict | None:
 
         ratio = last_vol / avg_vol
 
+        close_price  = float(closed[4])
+        open_price   = float(closed[1])
+        price_change = ((close_price - open_price) / open_price) * 100
+        bar_time     = datetime.utcfromtimestamp(closed[0] / 1000).strftime("%H:%M UTC")
+
+        # 🚀 Yeni filtreler
+        if last_vol * close_price < MIN_VOLUME_USDT:  # USDT hacmi kontrolü
+            return None
+        if abs(price_change) < MIN_BAR_CHANGE:       # minimum bar değişimi kontrolü
+            return None
+
         if ratio >= VOLUME_MULTIPLIER:
-            close_price  = float(closed[4])
-            open_price   = float(closed[1])
-            price_change = ((close_price - open_price) / open_price) * 100
-            bar_time     = datetime.utcfromtimestamp(closed[0] / 1000).strftime("%H:%M UTC")
             return {
                 "symbol": symbol, "last_vol": last_vol, "avg_vol": avg_vol,
                 "ratio": ratio, "close_price": close_price,
