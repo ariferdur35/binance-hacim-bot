@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 import logging
+import time
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -39,7 +40,8 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # Global olarak gönderilmiş barları tutacağız
-sent_bars = set()
+sent_bars = {}  # {bar_id: timestamp}
+IGNORE_PERIOD = 60 * 60  # 1 saat (saniye cinsinden)
 
 # ----------------------------------------------------------
 # Abone yönetimi
@@ -124,27 +126,29 @@ async def check_volume_spike(session: ClientSession, symbol: str) -> dict | None
 
         last_vol = float(closed[5])
         avg_vol = sum(float(k[5]) for k in previous) / len(previous)
-
-        if avg_vol == 0 or last_vol * float(closed[4]) < MIN_VOLUME_USDT:
-            return None
-
         close_price = float(closed[4])
         open_price = float(closed[1])
         price_change = ((close_price - open_price) / open_price) * 100
+        ratio = last_vol / avg_vol
+
+        if avg_vol == 0 or last_vol * close_price < MIN_VOLUME_USDT:
+            return None
         if abs(price_change) < MIN_BAR_CHANGE:
             return None
-
-        ratio = last_vol / avg_vol
         if ratio < VOLUME_MULTIPLIER:
             return None
 
         bar_id = f"{symbol}-{closed[0]}"
-        if bar_id in sent_bars:
+        now_ts = time.time()
+
+        # 1 saat ignore kontrolü
+        if bar_id in sent_bars and now_ts - sent_bars[bar_id] < IGNORE_PERIOD:
             return None
 
-        sent_bars.add(bar_id)
-        if len(sent_bars) > SENT_BARS_MAX:
-            sent_bars = set(list(sent_bars)[-SENT_BARS_MAX:])
+        sent_bars[bar_id] = now_ts
+
+        # Memory safe: eski kayıtları temizle
+        sent_bars = {k: v for k, v in sent_bars.items() if now_ts - v < IGNORE_PERIOD}
 
         bar_time = datetime.utcfromtimestamp(closed[0] / 1000).strftime("%H:%M UTC")
         return {
