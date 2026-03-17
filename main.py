@@ -45,7 +45,7 @@ log = logging.getLogger(__name__)
 # Global
 # =========================
 sent_coins = {}  # hacim cooldown
-ma_sent    = {}  # MA233 cooldown
+ema_sent    = {}  # MA233 cooldown
 ema_time = "4h"
 
 # =========================
@@ -180,7 +180,7 @@ async def check_ema233_breakout(session: ClientSession, symbol: str, interval="4
     """
     233 periyotluk EMA kırılımını kontrol eder
     """
-    global ma_sent
+    global ema_sent
     try:
         klines = await get_klines(session, symbol, interval, 500)
         if len(klines) < 233:
@@ -201,12 +201,12 @@ async def check_ema233_breakout(session: ClientSession, symbol: str, interval="4
 
         # cooldown
         now = time.time()
-        if symbol in ma_sent and now - ma_sent[symbol] < MA_COOLDOWN:
+        if symbol in ema_sent and now - ema_sent[symbol] < MA_COOLDOWN:
             return None
 
         # Kırılım kontrolü
         if prev_close < prev_ema233 and last_close > ema233:
-            ma_sent[symbol] = now
+            ema_sent[symbol] = now
             return {"symbol": symbol, "price": last_close, "ma": ema233, "interval": ema_time}
 
         return None
@@ -279,7 +279,7 @@ async def run_scan(session, subscribers):
     log.info(f"Toplam {len(symbols)} USDT paritesi bulundu.")
 
     volume_results = []
-    ma_results = []
+    ema_results = []
 
     for i in range(0, len(symbols), CHUNK_SIZE):
         chunk = symbols[i:i+CHUNK_SIZE]
@@ -291,18 +291,18 @@ async def run_scan(session, subscribers):
         ema_res = await asyncio.gather(*ema_tasks)
 
         volume_results.extend([r for r in vol_res if r])
-        ma_results.extend([r for r in ma_res if r])
+        ema_results.extend([r for r in ema_res if r])
 
     if volume_results:
         volume_results.sort(key=lambda x:x["ratio"], reverse=True)
         message = build_message(volume_results, scan_time)
         await send_to_all(session, subscribers, message)
 
-    if ma_results:
-        message = build_ema_message(ma_results)
+    if ema_results:
+        message = build_ema_message(ema_results)
         await send_to_all(session, subscribers, message)
 
-    log.info(f"Hacim: {len(volume_results)} | MA233: {len(ma_results)}")
+    log.info(f"Hacim: {len(volume_results)} | EMA233: {len(ema_results)}")
 
 # =========================
 # Telegram listener
