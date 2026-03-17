@@ -46,7 +46,7 @@ log = logging.getLogger(__name__)
 # =========================
 sent_coins = {}  # hacim cooldown
 ma_sent    = {}  # MA233 cooldown
-ma_time = "4h"
+ema_time = "4h"
 
 # =========================
 # Abone yönetimi
@@ -174,9 +174,12 @@ async def check_volume_spike(session: ClientSession, symbol: str):
         return None
 
 # =========================
-# MA233 kırılım - 4 saatlik
+# EMA233 kırılım - 4 saatlik
 # =========================
-async def check_ma233_breakout(session: ClientSession, symbol: str,interval="4h"):
+async def check_ema233_breakout(session: ClientSession, symbol: str, interval="4h"):
+    """
+    233 periyotluk EMA kırılımını kontrol eder
+    """
     global ma_sent
     try:
         klines = await get_klines(session, symbol, interval, 500)
@@ -185,8 +188,13 @@ async def check_ma233_breakout(session: ClientSession, symbol: str,interval="4h"
 
         closes = [float(k[4]) for k in klines]
 
-        ma233 = sum(closes[-233:]) / 233
-        prev_ma233 = sum(closes[-234:-1]) / 233
+        # EMA alpha hesaplama
+        N = 233
+        alpha = 2 / (N + 1)
+
+        # EMA hesapla
+        ema233 = calculate_ema(closes[-233:], alpha=alpha)
+        prev_ema233 = calculate_ema(closes[-234:-1], alpha=alpha)
 
         last_close = closes[-1]
         prev_close = closes[-2]
@@ -196,14 +204,15 @@ async def check_ma233_breakout(session: ClientSession, symbol: str,interval="4h"
         if symbol in ma_sent and now - ma_sent[symbol] < MA_COOLDOWN:
             return None
 
-        if prev_close < prev_ma233 and last_close > ma233:
+        # Kırılım kontrolü
+        if prev_close < prev_ema233 and last_close > ema233:
             ma_sent[symbol] = now
-            return {"symbol": symbol, "price": last_close, "ma": ma233, "interval": ma_time}
+            return {"symbol": symbol, "price": last_close, "ma": ema233, "interval": ema_time}
 
         return None
 
     except Exception as e:
-        log.debug(f"MA233 hata {symbol}: {e}")
+        log.debug(f"EMA233 hata {symbol}: {e}")
         return None
 
 # =========================
@@ -238,13 +247,16 @@ def build_message(results, scan_time):
     lines.append("⚡ <i>Bu bir sinyal değil, hacim anomali bildirimidir.</i>")
     return "\n".join(lines)
 
-def build_ma_message(results):
+# =========================
+# EMA mesaj formatlama
+# =========================
+def build_ema_message(results):
     if not results:
         return ""
 
-    interval = results[0].get("interval", ma_time)  # mesaj için interval
+    interval = results[0].get("interval", ema_time)  # mesaj için interval
     lines = [
-        "🚀 <b>MA233 KIRILIM</b>",
+        "🚀 <b>EMA233 KIRILIM</b>",
         f"📊 Zaman dilimi: {interval}",
         "─"*25
     ]
@@ -252,7 +264,7 @@ def build_ma_message(results):
         lines.append(
             f"\n{i}. <b>{r['symbol']}</b>\n"
             f"   💰 Fiyat: <code>{r['price']:.6f}</code>\n"
-            f"   📈 MA233: <code>{r['ma']:.6f}</code>"
+            f"   📈 EMA233: <code>{r['ma']:.6f}</code>"
         )
     lines.append("\n⚡ <i>Yeni kırılım sinyali</i>")
     return "\n".join(lines)
@@ -273,10 +285,10 @@ async def run_scan(session, subscribers):
         chunk = symbols[i:i+CHUNK_SIZE]
 
         volume_tasks = [check_volume_spike(session, s) for s in chunk]
-        ma_tasks     = [check_ma233_breakout(session, s,ma_time) for s in chunk]
+        ema_tasks = [check_ema233_breakout(session, s, ema_time) for s in chunk]
 
         vol_res = await asyncio.gather(*volume_tasks)
-        ma_res  = await asyncio.gather(*ma_tasks)
+        ema_res = await asyncio.gather(*ema_tasks)
 
         volume_results.extend([r for r in vol_res if r])
         ma_results.extend([r for r in ma_res if r])
@@ -287,7 +299,7 @@ async def run_scan(session, subscribers):
         await send_to_all(session, subscribers, message)
 
     if ma_results:
-        message = build_ma_message(ma_results)
+        message = build_ema_message(ma_results)
         await send_to_all(session, subscribers, message)
 
     log.info(f"Hacim: {len(volume_results)} | MA233: {len(ma_results)}")
