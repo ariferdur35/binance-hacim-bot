@@ -46,6 +46,7 @@ log = logging.getLogger(__name__)
 # =========================
 sent_coins = {}  # hacim cooldown
 ma_sent    = {}  # MA233 cooldown
+ma_time = "4h"
 
 # =========================
 # Abone yönetimi
@@ -173,12 +174,12 @@ async def check_volume_spike(session: ClientSession, symbol: str):
         return None
 
 # =========================
-# MA233 kırılım
+# MA233 kırılım - 4 saatlik
 # =========================
-async def check_ma233_breakout(session: ClientSession, symbol: str):
+async def check_ma233_breakout(session: ClientSession, symbol: str,interval="4h"):
     global ma_sent
     try:
-        klines = await get_klines(session, symbol, "1d", 300)
+        klines = await get_klines(session, symbol, interval, 500)
         if len(klines) < 233:
             return None
 
@@ -197,7 +198,7 @@ async def check_ma233_breakout(session: ClientSession, symbol: str):
 
         if prev_close < prev_ma233 and last_close > ma233:
             ma_sent[symbol] = now
-            return {"symbol": symbol, "price": last_close, "ma": ma233}
+            return {"symbol": symbol, "price": last_close, "ma": ma233, "interval": ma_time}
 
         return None
 
@@ -238,9 +239,13 @@ def build_message(results, scan_time):
     return "\n".join(lines)
 
 def build_ma_message(results):
+    if not results:
+        return ""
+
+    interval = results[0].get("interval", ma_time)  # mesaj için interval
     lines = [
         "🚀 <b>MA233 KIRILIM</b>",
-        "📊 1 Günlük (1D)",
+        f"📊 Zaman dilimi: {interval}",
         "─"*30
     ]
     for i, r in enumerate(results,1):
@@ -268,7 +273,7 @@ async def run_scan(session, subscribers):
         chunk = symbols[i:i+CHUNK_SIZE]
 
         volume_tasks = [check_volume_spike(session, s) for s in chunk]
-        ma_tasks     = [check_ma233_breakout(session, s) for s in chunk]
+        ma_tasks     = [check_ma233_breakout(session, s,ma_time) for s in chunk]
 
         vol_res = await asyncio.gather(*volume_tasks)
         ma_res  = await asyncio.gather(*ma_tasks)
