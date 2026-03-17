@@ -7,6 +7,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 import aiohttp
 from aiohttp import ClientSession, ClientTimeout
+import pandas as pd
 
 load_dotenv()
 
@@ -120,12 +121,6 @@ async def get_klines(session: ClientSession, symbol: str, interval: str, limit: 
     async with session.get(url, params=params) as resp:
         return await resp.json()
 
-def calculate_ema(values, alpha=0.3):
-    ema = values[0]
-    for v in values[1:]:
-        ema = alpha * v + (1 - alpha) * ema
-    return ema
-
 # =========================
 # Hacim kontrol
 # =========================
@@ -137,14 +132,20 @@ async def check_volume_spike(session: ClientSession, symbol: str):
             return None
 
         closed = klines[-2]
-        previous = klines[:-2]
+        avg_klines = klines[:-2]  # açık bar ve son kapanmış bar hariç
         last_vol = float(closed[5])
         close_price = float(closed[4])
         open_price = float(closed[1])
         price_change = ((close_price - open_price) / open_price) * 100
-        avg_vol = calculate_ema([float(k[5]) for k in previous])
+        # EMA hacim ortalaması
+        avg_vol = pd.Series([float(k[5]) for k in avg_klines]).ewm(span=14, adjust=False).mean().iloc[-1]
         ratio = last_vol / avg_vol
 
+        # coin bazlı cooldown
+        now_ts = time.time()
+        if symbol in sent_coins and now_ts - sent_coins[symbol] < COOLDOWN_SECONDS:
+            return None
+       
         # filtreler
         if avg_vol == 0 or last_vol * close_price < MIN_VOLUME_USDT:
             return None
@@ -152,11 +153,7 @@ async def check_volume_spike(session: ClientSession, symbol: str):
             return None
         if ratio < VOLUME_MULTIPLIER:
             return None
-
-        # coin bazlı cooldown
-        now_ts = time.time()
-        if symbol in sent_coins and now_ts - sent_coins[symbol] < COOLDOWN_SECONDS:
-            return None
+        
         sent_coins[symbol] = now_ts
 
         bar_time = datetime.utcfromtimestamp(closed[0]/1000).strftime("%H:%M UTC")
@@ -174,46 +171,41 @@ async def check_volume_spike(session: ClientSession, symbol: str):
         return None
 
 # =========================
-# EMA233 kırılım - 4 saatlik
+# EMA233 kırılım batch
 # =========================
-async def check_ema233_breakout(session: ClientSession, symbol: str, interval="4h"):
-    """
-    233 periyotluk EMA kırılımını kontrol eder
-    """
+async def check_ema233_breakout_batch(session: ClientSession, symbols: list):
     global ema_sent
-    try:
-        klines = await get_klines(session, symbol, interval, 500)
-        if len(klines) < 233:
-            return None
+    results = []
 
-        closes = [float(k[4]) for k in klines]
+    # tüm coinler için klines çek
+    tasks = [get_klines(session, s, ema_time, 500) for s in symbols]
+    all_klines = await asyncio.gather(*tasks)
 
-        # EMA alpha hesaplama
-        N = 233
-        alpha = 2 / (N + 1)
+    now = time.time()
+    for symbol, klines in zip(symbols, all_klines):
+        try:
+            if len(klines) < 300:
+                continue
 
-        # EMA hesapla
-        ema233 = calculate_ema(closes[-233:], alpha=alpha)
-        prev_ema233 = calculate_ema(closes[-234:-1], alpha=alpha)
+            closes = [float(k[4]) for k in klines[:-1]]
+            series = pd.Series(closes)
+            ema233 = series.ewm(span=233, adjust=False).mean()
 
-        last_close = closes[-1]
-        prev_close = closes[-2]
+            last_close = closes[-1]
+            prev_close = closes[-2]
+            last_ema = ema233.iloc[-1]
+            prev_ema = ema233.iloc[-2]
 
-        # cooldown
-        now = time.time()
-        if symbol in ema_sent and now - ema_sent[symbol] < MA_COOLDOWN:
-            return None
+            if symbol in ema_sent and now - ema_sent[symbol] < MA_COOLDOWN:
+                continue
 
-        # Kırılım kontrolü
-        if prev_close < prev_ema233 and last_close > ema233:
-            ema_sent[symbol] = now
-            return {"symbol": symbol, "price": last_close, "ma": ema233, "interval": ema_time}
+            if prev_close < prev_ema and last_close > last_ema:
+                ema_sent[symbol] = now
+                results.append({"symbol": symbol, "price": last_close, "ma": last_ema, "interval": ema_time})
+        except Exception as e:
+            log.debug(f"EMA233 batch hata {symbol}: {e}")
 
-        return None
-
-    except Exception as e:
-        log.debug(f"EMA233 hata {symbol}: {e}")
-        return None
+    return results
 
 # =========================
 # Mesaj formatlama
@@ -247,14 +239,10 @@ def build_message(results, scan_time):
     lines.append("⚡ <i>Bu bir sinyal değil, hacim anomali bildirimidir.</i>")
     return "\n".join(lines)
 
-# =========================
-# EMA mesaj formatlama
-# =========================
 def build_ema_message(results):
     if not results:
         return ""
-
-    interval = results[0].get("interval", ema_time)  # mesaj için interval
+    interval = results[0].get("interval", ema_time)
     lines = [
         "🚀 <b>EMA233 KIRILIM</b>",
         f"📊 Zaman dilimi: {interval}",
@@ -281,17 +269,17 @@ async def run_scan(session, subscribers):
     volume_results = []
     ema_results = []
 
+    # chunk bazlı işle
     for i in range(0, len(symbols), CHUNK_SIZE):
         chunk = symbols[i:i+CHUNK_SIZE]
-
+        # hacim kontrolü
         volume_tasks = [check_volume_spike(session, s) for s in chunk]
-        ema_tasks = [check_ema233_breakout(session, s, ema_time) for s in chunk]
-
         vol_res = await asyncio.gather(*volume_tasks)
-        ema_res = await asyncio.gather(*ema_tasks)
-
         volume_results.extend([r for r in vol_res if r])
-        ema_results.extend([r for r in ema_res if r])
+
+        # EMA233 batch kontrol
+        ema_res = await check_ema233_breakout_batch(session, chunk)
+        ema_results.extend(ema_res)
 
     if volume_results:
         volume_results.sort(key=lambda x:x["ratio"], reverse=True)
@@ -326,7 +314,7 @@ async def process_updates(session, subscribers, last_update_id):
         text = msg.get("text","")
         chat = msg.get("chat",{})
         chat_id = chat.get("id")
-        username = chat.get("username","")
+        # username = chat.get("username","")
         first_name = chat.get("first_name","Kullanıcı")
 
         if not chat_id:
