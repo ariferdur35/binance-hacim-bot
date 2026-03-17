@@ -222,7 +222,7 @@ def build_message(results, scan_time):
         f"🕐 Tarama: <b>{scan_time} UTC</b>",
         f"📊 Zaman dilimi: <b>{INTERVAL}</b> | Eşik: <b>%{int((VOLUME_MULTIPLIER-1)*100)} artış</b>",
         f"🎯 Bulunan coin: <b>{len(results)}</b>",
-        "─"*30
+        "─"*25
     ]
     for i, r in enumerate(results,1):
         direction = "🟢" if r["price_change"]>=0 else "🔴"
@@ -246,7 +246,7 @@ def build_ma_message(results):
     lines = [
         "🚀 <b>MA233 KIRILIM</b>",
         f"📊 Zaman dilimi: {interval}",
-        "─"*30
+        "─"*25
     ]
     for i, r in enumerate(results,1):
         lines.append(
