@@ -1,28 +1,35 @@
-import requests
-import time
-import json
 import os
+import json
+import asyncio
 import logging
 from datetime import datetime
 from dotenv import load_dotenv
 
+import aiohttp
+from aiohttp import ClientSession, ClientTimeout
+
 load_dotenv()
 
 # ============================================================
-#  AYARLAR - Sadece token'ı gir, Chat ID otomatik alınır
+#  AYARLAR
 # ============================================================
 TELEGRAM_BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not TELEGRAM_BOT_TOKEN:
+    raise ValueError("BOT_TOKEN bulunamadı!")
 
-INTERVAL          = "15m"
-SCAN_PERIOD_MIN   = 15
-LOOKBACK_BARS     = 50
-VOLUME_MULTIPLIER = 3.1
-MIN_VOLUME_USDT = 10000  # minimum hacim 10k USDT
-MIN_BAR_CHANGE = 5  # yüzde
+INTERVAL          = "5m"
+SCAN_PERIOD_MIN   = 1
+LOOKBACK_BARS     = 20
+VOLUME_MULTIPLIER = 4
+MIN_VOLUME_USDT   = 20000
+MIN_BAR_CHANGE    = 2.5
 
-SUBSCRIBERS_FILE  = "subscribers.json"   # Chat ID'ler burada saklanır
-MAX_LEN = 4000
-# ============================================================
+SUBSCRIBERS_FILE  = "subscribers.json"
+MAX_LEN           = 4000
+SENT_BARS_MAX     = 5000  # memory safe duplicate kontrolü
+
+BINANCE_BASE = "https://api.binance.com"
+TELEGRAM_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,25 +38,21 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-BINANCE_BASE = "https://api.binance.com"
-TELEGRAM_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
-
+# Global olarak gönderilmiş barları tutacağız
+sent_bars = set()
 
 # ----------------------------------------------------------
 # Abone yönetimi
 # ----------------------------------------------------------
-
 def load_subscribers() -> set:
     if os.path.exists(SUBSCRIBERS_FILE):
         with open(SUBSCRIBERS_FILE, "r") as f:
             return set(json.load(f))
     return set()
 
-
 def save_subscribers(subscribers: set) -> None:
     with open(SUBSCRIBERS_FILE, "w") as f:
         json.dump(list(subscribers), f)
-
 
 def add_subscriber(chat_id: int, subscribers: set) -> bool:
     if chat_id not in subscribers:
@@ -58,191 +61,92 @@ def add_subscriber(chat_id: int, subscribers: set) -> bool:
         return True
     return False
 
-
 # ----------------------------------------------------------
-# Telegram yardımcı fonksiyonlar
+# Telegram fonksiyonları (async)
 # ----------------------------------------------------------
-
-def send_message(chat_id: int, text: str) -> None:
+async def send_message(session: ClientSession, chat_id: int, text: str) -> None:
     url = f"{TELEGRAM_BASE}/sendMessage"
+    lines = text.split("\n")
+    chunk = ""
 
     try:
-        lines = text.split("\n")
-        chunk = ""
-
         for line in lines:
             if len(chunk) + len(line) + 1 > MAX_LEN:
-                payload = {
-                    "chat_id": chat_id,
-                    "text": chunk,
-                    "parse_mode": "HTML"
-                }
-
-                resp = requests.post(url, json=payload, timeout=10)
-                resp.raise_for_status()
+                payload = {"chat_id": chat_id, "text": chunk, "parse_mode": "HTML"}
+                async with session.post(url, json=payload, timeout=10) as resp:
+                    await resp.text()
                 chunk = ""
-
             chunk += line + "\n"
 
         if chunk:
-            payload = {
-                "chat_id": chat_id,
-                "text": chunk,
-                "parse_mode": "HTML"
-            }
-
-            resp = requests.post(url, json=payload, timeout=10)
-            resp.raise_for_status()
-
+            payload = {"chat_id": chat_id, "text": chunk, "parse_mode": "HTML"}
+            async with session.post(url, json=payload, timeout=10) as resp:
+                await resp.text()
     except Exception as e:
         log.error(f"Mesaj gönderilemedi (chat_id={chat_id}): {e}")
 
-
-def send_to_all(subscribers: set, message: str) -> None:
+async def send_to_all(session: ClientSession, subscribers: set, message: str) -> None:
     if not subscribers:
         log.warning("Abone listesi boş, mesaj gönderilmedi.")
         return
     log.info(f"{len(subscribers)} aboneye mesaj gönderiliyor...")
-    for chat_id in subscribers:
-        send_message(chat_id, message)
-        time.sleep(0.05)
-
-
-def get_updates(offset: int = 0) -> list:
-    url = f"{TELEGRAM_BASE}/getUpdates"
-    params = {"timeout": 10, "offset": offset}
-    try:
-        resp = requests.get(url, params=params, timeout=15)
-        resp.raise_for_status()
-        return resp.json().get("result", [])
-    except Exception as e:
-        log.error(f"getUpdates hatası: {e}")
-        return []
-
+    tasks = [send_message(session, chat_id, message) for chat_id in subscribers]
+    await asyncio.gather(*tasks)
 
 # ----------------------------------------------------------
-# /start komutunu dinle
+# Binance fonksiyonları (async)
 # ----------------------------------------------------------
-
-def process_updates(subscribers: set, last_update_id: int) -> int:
-    updates = get_updates(offset=last_update_id + 1)
-    for update in updates:
-        last_update_id = update["update_id"]
-        message = update.get("message", {})
-        text = message.get("text", "")
-        chat = message.get("chat", {})
-        chat_id = chat.get("id")
-        username = chat.get("username", "")
-        first_name = chat.get("first_name", "Kullanıcı")
-
-        if not chat_id:
-            continue
-
-        if text == "/start":
-            log.info(f"✅ /start komutu — Chat ID: {chat_id} | @{username} | {first_name}")
-            print(f"\n{'='*50}")
-            print(f"  YENİ ABONE!")
-            print(f"  Chat ID   : {chat_id}")
-            print(f"  İsim      : {first_name}")
-            print(f"  Kullanıcı : @{username}")
-            print(f"{'='*50}\n")
-
-            is_new = add_subscriber(chat_id, subscribers)
-            if is_new:
-                send_message(chat_id, (
-                    f"👋 Merhaba <b>{first_name}</b>!\n\n"
-                    f"✅ Başarıyla abone oldun.\n\n"
-                    f"🔍 Her <b>{SCAN_PERIOD_MIN} dakikada</b> bir Binance Spot USDT "
-                    f"paritelerini tarayıp hacim anomalilerini sana bildireceğim.\n\n"
-                    f"📊 Zaman dilimi: <b>{INTERVAL}</b>\n"
-                    f"📦 Eşik: Son 20 barın ortalamasının <b>%{int((VOLUME_MULTIPLIER-1)*100)} üzeri</b>\n\n"
-                    f"⚡ Sinyaller gelmeye başlayacak, hazır ol!\n\n"
-                    f"❌ Durdurmak için: /stop"
-                ))
-            else:
-                send_message(chat_id, f"ℹ️ <b>{first_name}</b>, zaten abonesin! Sinyaller gelmeye devam edecek.")
-
-        elif text == "/stop":
-            if chat_id in subscribers:
-                subscribers.discard(chat_id)
-                save_subscribers(subscribers)
-                send_message(chat_id, "❌ Aboneliğin iptal edildi. Tekrar başlamak için /start yaz.")
-                log.info(f"Abone çıkarıldı: {chat_id} (@{username})")
-            else:
-                send_message(chat_id, "ℹ️ Zaten abone değilsin.")
-
-        elif text == "/liste":
-            send_message(chat_id, f"👥 Toplam abone sayısı: <b>{len(subscribers)}</b>")
-
-    return last_update_id
-
-
-# ----------------------------------------------------------
-# Binance fonksiyonlar
-# ----------------------------------------------------------
-
-def get_all_usdt_symbols() -> list:
+async def get_all_usdt_symbols(session: ClientSession) -> list:
     url = f"{BINANCE_BASE}/api/v3/exchangeInfo"
-    resp = requests.get(url, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
+    async with session.get(url, timeout=10) as resp:
+        data = await resp.json()
     return [
         s["symbol"]
         for s in data["symbols"]
-        if s["quoteAsset"] == "USDT"
-        and s["status"] == "TRADING"
-        and s["isSpotTradingAllowed"]
+        if s["quoteAsset"] == "USDT" and s["status"] == "TRADING" and s["isSpotTradingAllowed"]
     ]
 
-
-def get_klines(symbol: str, interval: str, limit: int) -> list:
+async def get_klines(session: ClientSession, symbol: str, interval: str, limit: int) -> list:
     url = f"{BINANCE_BASE}/api/v3/klines"
     params = {"symbol": symbol, "interval": interval, "limit": limit}
-    resp = requests.get(url, params=params, timeout=10)
-    resp.raise_for_status()
-    return resp.json()
+    async with session.get(url, params=params, timeout=10) as resp:
+        return await resp.json()
 
-# Global olarak gönderilmiş barları tutacağız
-sent_bars = set()
-
-def check_volume_spike(symbol: str) -> dict | None:
+async def check_volume_spike(session: ClientSession, symbol: str) -> dict | None:
+    global sent_bars
     try:
-        klines = get_klines(symbol, INTERVAL, LOOKBACK_BARS)
+        klines = await get_klines(session, symbol, INTERVAL, LOOKBACK_BARS)
         if len(klines) < LOOKBACK_BARS:
             return None
 
-        closed   = klines[-2]
+        closed = klines[-2]
         previous = klines[:-2]
 
         last_vol = float(closed[5])
-        avg_vol  = sum(float(k[5]) for k in previous) / len(previous)
+        avg_vol = sum(float(k[5]) for k in previous) / len(previous)
 
-        if avg_vol == 0:
+        if avg_vol == 0 or last_vol * float(closed[4]) < MIN_VOLUME_USDT:
+            return None
+
+        close_price = float(closed[4])
+        open_price = float(closed[1])
+        price_change = ((close_price - open_price) / open_price) * 100
+        if abs(price_change) < MIN_BAR_CHANGE:
             return None
 
         ratio = last_vol / avg_vol
+        if ratio < VOLUME_MULTIPLIER:
+            return None
 
-        close_price  = float(closed[4])
-        open_price   = float(closed[1])
-        price_change = ((close_price - open_price) / open_price) * 100
-        bar_time     = datetime.utcfromtimestamp(closed[0] / 1000).strftime("%H:%M UTC")
-
-        # 🚀 Yeni filtreler
-        if last_vol * close_price < MIN_VOLUME_USDT:  # USDT hacmi kontrolü
-            return None
-        if abs(price_change) < MIN_BAR_CHANGE:       # minimum bar değişimi kontrolü
-            log.debug(f"{symbol} elendi: bar değişimi {price_change:.2f}% < {MIN_BAR_CHANGE}%")
-            return None
-        if ratio < VOLUME_MULTIPLIER:               # hacim artış oranı kontrolü
-            return None
-        
-        # Aynı barın tekrar gönderilmesini engelle
-        bar_id = f"{symbol}-{closed[0]}"  # symbol + timestamp
+        bar_id = f"{symbol}-{closed[0]}"
         if bar_id in sent_bars:
             return None
-        sent_bars.add(bar_id)
 
-        # Tüm filtreleri geçen coin
+        sent_bars.add(bar_id)
+        if len(sent_bars) > SENT_BARS_MAX:
+            sent_bars = set(list(sent_bars)[-SENT_BARS_MAX:])
+
+        bar_time = datetime.utcfromtimestamp(closed[0] / 1000).strftime("%H:%M UTC")
         return {
             "symbol": symbol,
             "last_vol": last_vol,
@@ -252,19 +156,18 @@ def check_volume_spike(symbol: str) -> dict | None:
             "price_change": price_change,
             "bar_time": bar_time,
         }
-    
-    except Exception as e:
-        log.debug(f"{symbol} atlandı: {e}")
-    return None
+    except Exception:
+        return None
 
-
+# ----------------------------------------------------------
+# Mesaj formatlama
+# ----------------------------------------------------------
 def _fmt(val: float) -> str:
     if val >= 1_000_000:
         return f"{val/1_000_000:.2f}M"
     if val >= 1_000:
         return f"{val/1_000:.1f}K"
     return f"{val:.2f}"
-
 
 def build_message(results: list, scan_time: str) -> str:
     lines = [
@@ -288,67 +191,104 @@ def build_message(results: list, scan_time: str) -> str:
     lines.append("⚡ <i>Bu bir sinyal değil, hacim anomali bildirimidir.</i>")
     return "\n".join(lines)
 
-
 # ----------------------------------------------------------
-# Ana döngü
+# Ana tarama task
 # ----------------------------------------------------------
-
-def run_scan(subscribers: set) -> None:
+async def run_scan(session: ClientSession, subscribers: set) -> None:
     log.info("Tarama başlıyor...")
     scan_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
-
-    symbols = get_all_usdt_symbols()
+    symbols = await get_all_usdt_symbols(session)
     log.info(f"Toplam {len(symbols)} USDT paritesi bulundu.")
 
-    results = []
-    for idx, symbol in enumerate(symbols):
-        result = check_volume_spike(symbol)
-        if result:
-            results.append(result)
-            log.info(f"✅ {symbol} — x{result['ratio']:.2f} hacim artışı")
-        if (idx + 1) % 10 == 0:
-            time.sleep(0.2)
+    # Async olarak tüm coinleri kontrol et
+    tasks = [check_volume_spike(session, symbol) for symbol in symbols]
+    results = [res for res in await asyncio.gather(*tasks) if res]
 
     log.info(f"Tarama tamamlandı. {len(results)} coin eşiği aştı.")
-
     if results:
         results.sort(key=lambda x: x["ratio"], reverse=True)
         message = build_message(results, scan_time)
-        send_to_all(subscribers, message)
-    else:
-        log.info("Eşiği aşan coin bulunamadı.")
+        await send_to_all(session, subscribers, message)
 
+# ----------------------------------------------------------
+# Telegram listener task
+# ----------------------------------------------------------
+async def get_updates(session: ClientSession, offset: int = 0) -> list:
+    url = f"{TELEGRAM_BASE}/getUpdates"
+    params = {"timeout": 10, "offset": offset}
+    try:
+        async with session.get(url, params=params, timeout=15) as resp:
+            data = await resp.json()
+        return data.get("result", [])
+    except Exception as e:
+        log.error(f"getUpdates hatası: {e}")
+        return []
 
-def main() -> None:
-    log.info("=" * 50)
-    log.info("  Binance Hacim Tarayıcı Botu Başlatıldı")
+async def process_updates(session: ClientSession, subscribers: set, last_update_id: int) -> int:
+    updates = await get_updates(session, last_update_id + 1)
+    for update in updates:
+        last_update_id = update["update_id"]
+        message = update.get("message", {})
+        text = message.get("text", "")
+        chat = message.get("chat", {})
+        chat_id = chat.get("id")
+        username = chat.get("username", "")
+        first_name = chat.get("first_name", "Kullanıcı")
+
+        if not chat_id:
+            continue
+
+        if text == "/start":
+            log.info(f"✅ /start komutu — Chat ID: {chat_id} | @{username} | {first_name}")
+            is_new = add_subscriber(chat_id, subscribers)
+            if is_new:
+                await send_message(session, chat_id,
+                    f"👋 Merhaba <b>{first_name}</b>!\n✅ Başarıyla abone oldun.\n📊 Tarama: {INTERVAL}\n⚡ Sinyaller gelmeye başlayacak.\n❌ Durdurmak için: /stop")
+            else:
+                await send_message(session, chat_id, f"ℹ️ Zaten abonesin!")
+
+        elif text == "/stop":
+            if chat_id in subscribers:
+                subscribers.discard(chat_id)
+                save_subscribers(subscribers)
+                await send_message(session, chat_id, "❌ Aboneliğin iptal edildi.")
+            else:
+                await send_message(session, chat_id, "ℹ️ Zaten abone değilsin.")
+
+        elif text == "/liste":
+            await send_message(session, chat_id, f"👥 Toplam abone sayısı: <b>{len(subscribers)}</b>")
+
+    return last_update_id
+
+# ----------------------------------------------------------
+# Main
+# ----------------------------------------------------------
+async def main():
+    log.info("="*50)
+    log.info("  Binance Hacim Tarayıcı Botu Başlatıldı (Async)")
     log.info(f"  Zaman dilimi  : {INTERVAL}")
     log.info(f"  Tarama aralığı: Her {SCAN_PERIOD_MIN} dakika")
     log.info(f"  Hacim eşiği   : %{int((VOLUME_MULTIPLIER-1)*100)} artış")
-    log.info("=" * 50)
-    log.info("📢 Bota /start yazarak abone olunabilir!")
+    log.info("="*50)
 
     subscribers = load_subscribers()
     log.info(f"Mevcut abone sayısı: {len(subscribers)}")
 
     last_update_id = 0
-    next_scan_time = time.time()
+    next_scan_time = asyncio.get_event_loop().time()
 
-    while True:
-        # /start komutlarını sürekli dinle
-        last_update_id = process_updates(subscribers, last_update_id)
+    async with aiohttp.ClientSession(timeout=ClientTimeout(total=15)) as session:
+        while True:
+            last_update_id = await process_updates(session, subscribers, last_update_id)
 
-        # Tarama zamanı geldiyse çalıştır
-        if time.time() >= next_scan_time:
-            try:
-                run_scan(subscribers)
-            except Exception as e:
-                log.error(f"Tarama hatası: {e}")
-            next_scan_time = time.time() + (SCAN_PERIOD_MIN * 60)
-            log.info(f"Sonraki tarama {SCAN_PERIOD_MIN} dakika sonra...")
+            if asyncio.get_event_loop().time() >= next_scan_time:
+                try:
+                    await run_scan(session, subscribers)
+                except Exception as e:
+                    log.error(f"Tarama hatası: {e}")
+                next_scan_time = asyncio.get_event_loop().time() + (SCAN_PERIOD_MIN * 60)
 
-        time.sleep(3)
-
+            await asyncio.sleep(1)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
