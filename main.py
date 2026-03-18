@@ -20,9 +20,9 @@ if not TELEGRAM_BOT_TOKEN:
 
 INTERVAL          = "5m"
 SCAN_PERIOD_MIN   = 1
-LOOKBACK_BARS     = 20
-VOLUME_MULTIPLIER = 4
-MIN_VOLUME_USDT   = 20000
+LOOKBACK_BARS     = 100
+VOLUME_MULTIPLIER = 3
+MIN_VOLUME_USDT   = 100000
 MIN_BAR_CHANGE    = 2.5
 COOLDOWN_SECONDS  = 60 * 60  # coin bazlı 1 saat ignore (hacim)
 MA_COOLDOWN       = 24*60*60 # coin bazlı 24 saat ignore (MA233)
@@ -127,12 +127,12 @@ async def get_klines(session: ClientSession, symbol: str, interval: str, limit: 
 async def check_volume_spike(session: ClientSession, symbol: str):
     global sent_coins
     try:
-        klines = await get_klines(session, symbol, INTERVAL, LOOKBACK_BARS)
-        if len(klines) < LOOKBACK_BARS:
+        klines = await get_klines(session, symbol, INTERVAL, 100)
+        if len(klines) < 100:
             return None
 
         closed = klines[-2]
-        avg_klines = klines[:-2]  # açık bar ve son kapanmış bar hariç
+        avg_klines = klines[-22:-2]  # son 20 kapanmış bar (hacim ortalaması için)
         last_vol = float(closed[5])
         close_price = float(closed[4])
         open_price = float(closed[1])
@@ -140,6 +140,9 @@ async def check_volume_spike(session: ClientSession, symbol: str):
         # EMA hacim ortalaması
         avg_vol = pd.Series([float(k[5]) for k in avg_klines]).ewm(span=14, adjust=False).mean().iloc[-1]
         ratio = last_vol / avg_vol
+        # EMA50 trend filtresi
+        ema50 = pd.Series([float(k[4]) for k in klines[:-1]]).ewm(span=50, adjust=False).mean().iloc[-1]
+        trend = "↑ Trend Uyumlu" if close_price > ema50 else "↓ Trende Karşı"
 
         # coin bazlı cooldown
         now_ts = time.time()
@@ -165,6 +168,7 @@ async def check_volume_spike(session: ClientSession, symbol: str):
             "close_price": close_price,
             "price_change": price_change,
             "bar_time": bar_time,
+            "trend": trend,
         }
     except Exception as e:
         log.debug(f"{symbol} hata: {e}")
@@ -222,10 +226,10 @@ def _fmt(val: float) -> str:
         return f"{val/1_000:.1f}K"
     return f"{val:.2f}"
 
-def build_message(results, scan_time):
+def build_message(results, scan_time, label="🔥 HACİM TARAMA SONUÇLARI"):
     lines = [
-        f"🔥 <b>HACİM TARAMA SONUÇLARI</b>",
-        f"🕐 Tarama: <b>{scan_time} UTC</b>",
+        f"<b>{label}</b>",
+        f"🕐 Tarama: <b>{scan_time} TR</b>",
         f"📊 Zaman dilimi: <b>{INTERVAL}</b> | Eşik: <b>%{int((VOLUME_MULTIPLIER-1)*100)} artış</b>",
         f"🎯 Bulunan coin: <b>{len(results)}</b>",
         "─"*25
@@ -238,7 +242,7 @@ def build_message(results, scan_time):
             f"   📈 Bar değişimi: <b>{r['price_change']:+.2f}%</b>\n"
             f"   📦 Hacim artışı: <b>x{r['ratio']:.2f}</b> "
             f"({_fmt(r['last_vol'])}/ort. {_fmt(r['avg_vol'])})\n"
-            f"   ⏱ Bar saati: {r['bar_time']}"
+            f"   📊 Trend: <b>{r['trend']}</b>"
         )
     lines.append("\n" + "─"*30)
     lines.append("⚡ <i>Bu bir sinyal değil, hacim anomali bildirimidir.</i>")
@@ -268,7 +272,8 @@ def build_ema_message(results):
 # =========================
 async def run_scan(session, subscribers):
     log.info("Tarama başlıyor...")
-    scan_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+    from datetime import timezone, timedelta
+    scan_time = datetime.now(timezone(timedelta(hours=3))).strftime("%Y-%m-%d %H:%M")
     symbols = await get_all_usdt_symbols(session)
     log.info(f"Toplam {len(symbols)} USDT paritesi bulundu.")
 
@@ -289,8 +294,12 @@ async def run_scan(session, subscribers):
 
     if volume_results:
         volume_results.sort(key=lambda x:x["ratio"], reverse=True)
-        message = build_message(volume_results, scan_time)
-        await send_to_all(session, subscribers, message)
+        green = [r for r in volume_results if r["price_change"] >= 0]
+        red   = [r for r in volume_results if r["price_change"] < 0]
+        if green:
+            await send_to_all(session, subscribers, build_message(green, scan_time, "🟢 ALIŞ BASKILARI"))
+        if red:
+            await send_to_all(session, subscribers, build_message(red, scan_time, "🔴 SATIŞ BASKILARI"))
 
     if ema_results:
         message = build_ema_message(ema_results)
@@ -328,7 +337,7 @@ async def process_updates(session, subscribers, last_update_id):
         if text=="/start":
             is_new = add_subscriber(chat_id, subscribers)
             if is_new:
-                await send_message(session,chat_id,f"👋 Merhaba <b>{first_name}</b>!\n✅ Başarıyla abone oldun.\n📊 Tarama: {INTERVAL}\n⚡ Sinyaller gelmeye başlayacak.\n❌ Durdurmak için: /stop")
+                await send_message(session,chat_id,f"👋 Merhaba <b>{first_name}</b>!\n✅ Başarıyla abone oldun.\n❌ Durdurmak için: /stop")
             else:
                 await send_message(session,chat_id,f"ℹ️ Zaten abonesin!")
         elif text=="/stop":
