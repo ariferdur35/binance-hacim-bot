@@ -187,12 +187,12 @@ async def check_ema233_breakout_batch(session: ClientSession, symbols: list):
             if len(klines) < 300:
                 continue
 
-            closes = [float(k[4]) for k in klines[:-1]]
-            series = pd.Series(closes)
+            closes_for_ema = [float(k[4]) for k in klines[:-1]]
+            series = pd.Series(closes_for_ema)
             ema233 = series.ewm(span=233, adjust=False).mean()
 
-            last_close = closes[-1]
-            prev_close = closes[-2]
+            last_close = float(klines[-1][4])  # anlık (live) fiyat
+            prev_close = closes_for_ema[-1]    # son kapanmış bar
             last_ema = ema233.iloc[-1]
             prev_ema = ema233.iloc[-2]
 
