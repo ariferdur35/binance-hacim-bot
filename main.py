@@ -200,8 +200,13 @@ async def check_ema233_breakout_batch(session: ClientSession, symbols: list):
                 continue
 
             if prev_close < prev_ema and last_close > last_ema:
+                current_vol = float(klines[-1][5])
+                prev_vol    = float(klines[-2][5])
+                if prev_vol == 0 or current_vol < prev_vol * 1.10:
+                    continue
+                vol_increase = (current_vol / prev_vol - 1) * 100
                 ema_sent[symbol] = now
-                results.append({"symbol": symbol, "price": last_close, "ma": last_ema, "interval": ema_time})
+                results.append({"symbol": symbol, "price": last_close, "ma": last_ema, "interval": ema_time, "vol_increase": vol_increase})
         except Exception as e:
             log.debug(f"EMA233 batch hata {symbol}: {e}")
 
@@ -252,7 +257,8 @@ def build_ema_message(results):
         lines.append(
             f"\n{i}. <b>{r['symbol']}</b>\n"
             f"   💰 Fiyat: <code>{r['price']:.6f}</code>\n"
-            f"   📈 EMA233: <code>{r['ma']:.6f}</code>"
+            f"   📈 EMA233: <code>{r['ma']:.6f}</code>\n"
+            f"   {'🟢' if r['vol_increase'] >= 0 else '🔴'} Hacim: <b>{'+' if r['vol_increase'] >= 0 else ''}{r['vol_increase']:.1f}%</b>"
         )
     lines.append("\n⚡ <i>Yeni kırılım sinyali</i>")
     return "\n".join(lines)
